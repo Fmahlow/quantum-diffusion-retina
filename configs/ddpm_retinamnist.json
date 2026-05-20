@@ -1,0 +1,14 @@
+{
+  "data_flag": "retinamnist",
+  "split_for_training": "train",
+  "export_dir": "data/retinamnist/train",
+  "classes": [0, 1, 2, 3, 4],
+  "resolution": 32,
+  "train_batch_size": 64,
+  "num_epochs": 100,
+  "mixed_precision": "fp16",
+  "logger": "wandb",
+  "output_root": "outputs/ddpm",
+  "seed": 42
+}
+
