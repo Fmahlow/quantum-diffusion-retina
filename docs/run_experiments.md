@@ -1,21 +1,41 @@
-# Running experiments and generating tables
+# Running experiments — classical DDPM vs hybrid quantum DDPM
+
+This document is the single authoritative guide for reproducing the full
+classical vs quantum comparison on RetinaMNIST.  Steps 1–5 cover the
+classical DDPM baseline.  Steps 6–7 cover the hybrid quantum DDPM
+(QDiffusion).  Steps 8–9 cover evaluation and comparison.
+
+---
 
 ## 1. Environment
 
-Use the same Python environment for all steps. The current notebook metadata says Python 3.11.11, but the shell currently resolves `python` to Anaconda Python 3.9 with a broken PyTorch install. Before running training, activate or create an environment where these imports work:
+Use the same Python environment for all steps (Python 3.10+ recommended).
+Verify that the core imports work before proceeding:
 
 ```bash
-python -c "import torch, torchvision, diffusers, accelerate, medmnist, pandas, matplotlib; print(torch.__version__)"
+python -c "import torch, torchvision, diffusers, accelerate, medmnist, pennylane; \
+           print('torch', torch.__version__, '| pennylane', pennylane.__version__)"
 ```
 
-Minimal dependencies:
+Install all dependencies from the project root:
 
 ```bash
-pip install torch torchvision diffusers accelerate medmnist datasets pandas matplotlib
-pip install "torchmetrics[image]" torch-fidelity
+pip install -r requirements.txt
 ```
 
-For the current DDPM training script, clone and install Hugging Face diffusers training examples:
+Or install manually:
+
+```bash
+# Core
+pip install torch torchvision diffusers accelerate medmnist datasets
+pip install pandas matplotlib "torchmetrics[image]" torch-fidelity
+
+# Quantum simulation
+pip install pennylane pennylane-lightning
+```
+
+For the classical DDPM training script, the Hugging Face diffusers training
+examples are also required:
 
 ```bash
 git clone https://github.com/huggingface/diffusers.git
@@ -29,9 +49,14 @@ If using Weights & Biases:
 wandb login
 ```
 
-Otherwise pass `--logger tensorboard`, or pass `--logger none` to omit the logger argument.
+Pass `--logger tensorboard` or omit the flag entirely to skip W&B.
+
+---
 
 ## 2. Export RetinaMNIST by class
+
+This only needs to run once.  It downloads the dataset and writes one
+folder per class that the classical DDPM training script expects.
 
 ```bash
 python scripts/export_retinamnist.py \
@@ -40,25 +65,48 @@ python scripts/export_retinamnist.py \
   --resize 32
 ```
 
-This creates:
+Expected output:
 
-```text
-data/retinamnist/train/class0
-data/retinamnist/train/class1
-data/retinamnist/train/class2
-data/retinamnist/train/class3
-data/retinamnist/train/class4
+```
+data/retinamnist/train/
+  class0/   (~216 images, DR grade 0)
+  class1/   (~216 images, DR grade 1)
+  class2/   (~216 images, DR grade 2)
+  class3/   (~216 images, DR grade 3)
+  class4/   (~216 images, DR grade 4)
 ```
 
-## 3. Train the classical DDPM baseline
+---
 
-First inspect the commands:
+## 3. Train the classifier evaluator
+
+Train a `RetinaFeatureCNN` on the **real** training split only.  This model
+is not a generator; it is a fixed evaluation instrument used in all
+task-specific metrics.  It must be trained before any generative model
+evaluation.
+
+```bash
+python scripts/train_retina_classifier.py \
+  --output-dir outputs/classifier \
+  --epochs 30 \
+  --batch-size 64 \
+  --seed 42
+```
+
+Class-imbalance weights are enabled by default.  The best checkpoint is
+saved to `outputs/classifier/retina_classifier.pt`.
+
+---
+
+## 4. Train the classical DDPM baseline
+
+### Dry run (inspect commands only)
 
 ```bash
 python scripts/train_ddpm_by_class.py --dry-run
 ```
 
-Then run training:
+### Full training
 
 ```bash
 python scripts/train_ddpm_by_class.py \
@@ -72,7 +120,7 @@ python scripts/train_ddpm_by_class.py \
   --logger wandb
 ```
 
-For a quick smoke test, run only one class and fewer epochs:
+### Quick smoke test (single class, 1 epoch)
 
 ```bash
 python scripts/train_ddpm_by_class.py \
@@ -81,9 +129,103 @@ python scripts/train_ddpm_by_class.py \
   --logger tensorboard
 ```
 
-## 4. Evaluate models
+Checkpoints are saved to `outputs/ddpm/class{0..4}/`.
 
-Evaluate against the official test split:
+---
+
+## 5. Generate DDPM sample grids
+
+```bash
+python scripts/sample_ddpm_grid.py \
+  --pipeline-root outputs/ddpm \
+  --classes 0,1,2,3,4 \
+  --num-samples 25 \
+  --num-inference-steps 50 \
+  --output-dir reports/ddpm/samples
+```
+
+Add `--no-fp16` for CPU-only environments.  Outputs one PNG grid per class
+in `reports/ddpm/samples/`.
+
+---
+
+## 6. Train the hybrid quantum DDPM (QDiffusion)
+
+The QDiffusion model is a standard DDPM U-Net for 32×32 images where the
+bottleneck (4×4 spatial) replaces classical channel attention with a
+parameterized quantum circuit: 8-qubit `StronglyEntanglingLayers` that acts
+as a squeeze-and-excite gate.  One model is trained per class.
+
+All training runs on the device returned by `torch.cuda.is_available()`;
+the quantum layer uses PennyLane's `default.qubit` with a PyTorch backend
+and follows the tensor device automatically.
+
+### Full training (all classes, default config)
+
+```bash
+python scripts/train_qdiffusion_by_class.py \
+  --config configs/qdiffusion_retinamnist.json
+```
+
+### Custom run (override specific parameters)
+
+```bash
+python scripts/train_qdiffusion_by_class.py \
+  --config configs/qdiffusion_retinamnist.json \
+  --classes 0 1 2 \
+  --n-epochs 200 \
+  --batch-size 32 \
+  --seed 7
+```
+
+### Force CPU (e.g. no GPU available)
+
+```bash
+python scripts/train_qdiffusion_by_class.py \
+  --config configs/qdiffusion_retinamnist.json \
+  --device cpu
+```
+
+### Quick smoke test (single class, 5 epochs)
+
+```bash
+python scripts/train_qdiffusion_by_class.py \
+  --classes 0 \
+  --n-epochs 5 \
+  --quiet
+```
+
+Checkpoints are saved to `outputs/qdiffusion/class{0..4}/`:
+
+```
+outputs/qdiffusion/
+  qdiffusion_config_frozen.json   ← frozen hyperparameters for this run
+  class0/
+    checkpoint_epoch0100.pt
+    checkpoint_epoch0200.pt
+    checkpoint_epoch0300.pt
+    final.pt                      ← used by evaluation scripts
+  class1/
+    ...
+```
+
+Key hyperparameters (see `configs/qdiffusion_retinamnist.json`):
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `n_qubits` | 8 | Qubits in the bottleneck circuit |
+| `n_quantum_layers` | 3 | StronglyEntanglingLayers depth |
+| `base_ch` | 64 | U-Net base channel width |
+| `T` | 1000 | Diffusion timesteps |
+| `n_epochs` | 300 | Training epochs per class |
+| `batch_size` | 32 | |
+| `inference_stride` | 10 | Steps skipped during sampling (100 effective steps) |
+
+---
+
+## 7. Evaluate generative models
+
+### 7a. Evaluate classical DDPM — FID / Inception Score
 
 ```bash
 python scripts/evaluate_ddpm.py \
@@ -96,45 +238,9 @@ python scripts/evaluate_ddpm.py \
   --output-csv outputs/ddpm_metrics.csv
 ```
 
-For CPU-only evaluation, add:
+Add `--no-fp16` on CPU.
 
-```bash
---no-fp16
-```
-
-## 5. Generate tables and plots
-
-```bash
-python scripts/plot_metrics.py \
-  --metrics-csv outputs/ddpm_metrics.csv \
-  --output-dir reports/ddpm \
-  --title "DDPM RetinaMNIST"
-```
-
-Outputs:
-
-```text
-reports/ddpm/metrics_table.csv
-reports/ddpm/metrics_table.md
-reports/ddpm/metrics_table.tex
-reports/ddpm/fid_by_class.png
-reports/ddpm/inception_score_by_class.png
-```
-
-## 6. Task-specific evaluation
-
-Train a RetinaMNIST classifier using only real training data. This classifier is not the generative model; it is an evaluation instrument for feature-space and downstream-domain metrics.
-
-```bash
-python scripts/train_retina_classifier.py \
-  --output-dir outputs/classifier \
-  --epochs 30 \
-  --batch-size 64
-```
-
-Class weights are enabled by default to reduce class-imbalance bias in the evaluator. Use `--no-class-weights` only for ablation.
-
-Then evaluate generated images with the trained classifier:
+### 7b. Evaluate classical DDPM — task-specific metrics
 
 ```bash
 python scripts/evaluate_ddpm_task_metrics.py \
@@ -146,31 +252,71 @@ python scripts/evaluate_ddpm_task_metrics.py \
   --output-csv outputs/ddpm_task_metrics.csv
 ```
 
-This produces:
+### 7c. Evaluate QDiffusion — task-specific metrics
 
-```text
-Feature_FID
-Feature_MMD_RBF
-Fake_Target_Accuracy
-Fake_Target_Confidence
-Fake_Prediction_MAE
-Real_Target_Accuracy
-Fake_To_Real_NN_Distance
-Real_Within_NN_Distance
-Fake_Within_NN_Distance
-Fake_Diversity_Ratio
+```bash
+python scripts/evaluate_qdiffusion_task_metrics.py \
+  --qdiffusion-root outputs/qdiffusion \
+  --classifier-checkpoint outputs/classifier/retina_classifier.pt \
+  --split test \
+  --classes 0,1,2,3,4 \
+  --num-generated 200 \
+  --output-csv outputs/qdiffusion_task_metrics.csv
 ```
 
-Generate the task-specific tables and plots:
+Both evaluation scripts produce the same columns so the CSVs can be
+compared directly:
+
+| Metric | Direction | Description |
+|--------|-----------|-------------|
+| `Feature_FID` | ↓ lower better | FID in RetinaMNIST classifier feature space |
+| `Feature_MMD_RBF` | ↓ lower better | Kernel MMD between real and fake features |
+| `Fake_Target_Accuracy` | ↑ higher better | Fraction of fakes classified as intended class |
+| `Fake_Target_Confidence` | ↑ higher better | Mean classifier confidence for intended class |
+| `Fake_Prediction_MAE` | ↓ lower better | Ordinal distance: predicted class vs intended class |
+| `Real_Target_Accuracy` | ↑ higher better | Classifier sanity check on real images |
+| `Fake_To_Real_NN_Distance` | — | Mean nearest-neighbour distance fake→real (memorisation check) |
+| `Fake_Diversity_Ratio` | ~1 ideal | Within-class NN distance: fake / real (mode-collapse check) |
+
+---
+
+## 8. Classical vs quantum comparison
+
+Once both `outputs/ddpm_task_metrics.csv` and
+`outputs/qdiffusion_task_metrics.csv` exist, run:
+
+```bash
+python scripts/compare_models.py \
+  --ddpm-csv outputs/ddpm_task_metrics.csv \
+  --qdiffusion-csv outputs/qdiffusion_task_metrics.csv \
+  --output-dir outputs/comparison
+```
+
+Outputs:
+
+```
+outputs/comparison/
+  combined_task_metrics.csv      ← stacked CSV with Model column (DDPM / QDiffusion)
+  comparison_metrics.png         ← bar chart: each metric × class, DDPM vs QDiffusion
+```
+
+The comparison table printed to stdout shows per-class values and the
+delta `QDiffusion − DDPM` for each metric.
+
+---
+
+## 9. Tables and plots for the paper
+
+### FID/IS table from DDPM
 
 ```bash
 python scripts/plot_metrics.py \
-  --metrics-csv outputs/ddpm_task_metrics.csv \
-  --output-dir reports/ddpm_task \
-  --title "DDPM RetinaMNIST task-specific"
+  --metrics-csv outputs/ddpm_metrics.csv \
+  --output-dir reports/ddpm \
+  --title "DDPM RetinaMNIST"
 ```
 
-To create a single combined table with FID/IS and task-specific metrics:
+### Combined all-metrics table (DDPM only)
 
 ```bash
 python scripts/combine_metric_csvs.py \
@@ -180,44 +326,59 @@ python scripts/combine_metric_csvs.py \
 python scripts/plot_metrics.py \
   --metrics-csv outputs/ddpm_all_metrics.csv \
   --output-dir reports/ddpm_all \
-  --title "DDPM RetinaMNIST all metrics"
+  --title "DDPM RetinaMNIST — all metrics"
 ```
 
-## 7. Generate sample grids
+### Classical vs quantum comparison figure
+
+Use `outputs/comparison/comparison_metrics.png` (produced in step 8)
+directly in the paper as the main comparison figure.
+
+---
+
+## 10. Statistical rigour (multi-seed runs)
+
+To produce confidence intervals, run each model with at least 3 seeds and
+aggregate:
 
 ```bash
-python scripts/sample_ddpm_grid.py \
-  --pipeline-root outputs/ddpm \
-  --classes 0,1,2,3,4 \
-  --num-samples 25 \
-  --num-inference-steps 50 \
-  --output-dir reports/ddpm/samples
+for SEED in 42 7 123; do
+  python scripts/train_qdiffusion_by_class.py \
+    --config configs/qdiffusion_retinamnist.json \
+    --seed $SEED \
+    --output-root outputs/qdiffusion_seed${SEED}
+
+  python scripts/evaluate_qdiffusion_task_metrics.py \
+    --qdiffusion-root outputs/qdiffusion_seed${SEED} \
+    --classifier-checkpoint outputs/classifier/retina_classifier.pt \
+    --output-csv outputs/qdiffusion_task_metrics_seed${SEED}.csv \
+    --seed $SEED
+done
 ```
 
-For CPU-only sampling, add:
+Then combine and compute mean ± std across seeds:
 
 ```bash
---no-fp16
+python scripts/combine_metric_csvs.py \
+  --inputs \
+    outputs/qdiffusion_task_metrics_seed42.csv \
+    outputs/qdiffusion_task_metrics_seed7.csv \
+    outputs/qdiffusion_task_metrics_seed123.csv \
+  --output-csv outputs/qdiffusion_task_metrics_multiseed.csv
 ```
 
-Outputs:
+---
 
-```text
-reports/ddpm/samples/class0_samples.png
-reports/ddpm/samples/class1_samples.png
-reports/ddpm/samples/class2_samples.png
-reports/ddpm/samples/class3_samples.png
-reports/ddpm/samples/class4_samples.png
-```
+## Recommended evaluation cautions
 
-## 8. Recommended paper figures
-
-Use the DDPM metrics as baseline, but do not make FID/Inception Score the central scientific claim. For RetinaMNIST, the strongest evidence should be:
-
-- class-wise generative metrics,
-- generated-sample grids per class,
-- nearest-neighbor checks against real train images,
-- downstream classifier utility: real-only versus real+synthetic,
-- confidence intervals across at least 3 seeds.
-
-The quantum model should write its metrics in the same CSV schema as `outputs/ddpm_metrics.csv`; then `scripts/plot_metrics.py` can produce comparable tables and plots.
+- **FID/Inception Score are secondary for RetinaMNIST.** The Inception
+  feature extractor is trained on natural images; use `Feature_FID` and
+  `Feature_MMD_RBF` (computed in RetinaMNIST classifier feature space) as
+  the primary distribution metrics.
+- **Fake_Diversity_Ratio ≈ 1** is the target. Values far below 1 indicate
+  mode collapse; values far above 1 may indicate class leakage or
+  unrealistic dispersion.
+- **Very low Fake_To_Real_NN_Distance** relative to
+  `Real_Within_NN_Distance` is a memorisation signal.
+- Central claims should rest on task-specific metrics and downstream
+  augmentation utility, not FID alone.
