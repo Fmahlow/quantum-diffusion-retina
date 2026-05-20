@@ -5,6 +5,8 @@ matplotlib
 medmnist
 numpy
 pandas
+pennylane
+pennylane-lightning
 Pillow
 torch
 torch-fidelity

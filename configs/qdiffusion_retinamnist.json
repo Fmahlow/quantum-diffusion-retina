@@ -1,0 +1,22 @@
+{
+  "n_qubits": 8,
+  "n_quantum_layers": 3,
+  "img_channels": 3,
+  "img_size": 32,
+  "base_ch": 64,
+  "t_dim": 256,
+  "emb_dim": 1024,
+  "dropout": 0.1,
+  "T": 1000,
+  "n_epochs": 300,
+  "batch_size": 32,
+  "lr": 2e-4,
+  "grad_clip": 1.0,
+  "seed": 42,
+  "save_every": 100,
+  "inference_stride": 10,
+  "classes": [0, 1, 2, 3, 4],
+  "output_root": "outputs/qdiffusion",
+  "split_for_training": "train",
+  "num_generated_for_eval": 200
+}
